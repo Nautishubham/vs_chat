@@ -1,0 +1,388 @@
+{
+  "name": "azure-codex-chat",
+  "displayName": "Azure Codex Chat",
+  "description": "AI coding assistant powered by Azure OpenAI GPT-5.2 Codex Max",
+  "version": "1.0.0",
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": [
+    "AI",
+    "Chat",
+    "Programming Languages"
+  ],
+  "activationEvents": [
+    "onStartupFinished"
+  ],
+  "main": "./out/extension.js",
+  "contributes": {
+    "commands": [
+      {
+        "command": "azureCodex.openChat",
+        "title": "Open Azure Codex Chat",
+        "icon": "$(comment-discussion)"
+      },
+      {
+        "command": "azureCodex.explainCode",
+        "title": "Azure Codex: Explain Selected Code"
+      },
+      {
+        "command": "azureCodex.fixCode",
+        "title": "Azure Codex: Fix Selected Code"
+      },
+      {
+        "command": "azureCodex.generateCode",
+        "title": "Azure Codex: Generate Code from Comment"
+      },
+      {
+        "command": "azureCodex.clearChat",
+        "title": "Azure Codex: Clear Chat History"
+      },
+      {
+        "command": "azureCodex.undoLastApply",
+        "title": "Azure Codex: Undo Last Applied Change",
+        "icon": "$(discard)"
+      },
+      {
+        "command": "azureCodex.buildSemanticIndex",
+        "title": "Azure Codex: Build Semantic Index",
+        "icon": "$(database)"
+      },
+      {
+        "command": "azureCodex.inlineEdit",
+        "title": "Azure Codex: Inline Edit…",
+        "icon": "$(edit)"
+      },
+      {
+        "command": "azureCodex.inlineEditCmdK",
+        "title": "Azure Codex: Inline Edit (Cmd+K)…",
+        "icon": "$(edit)"
+      },
+      {
+        "command": "azureCodex.inlineEditAccept",
+        "title": "Azure Codex: Inline Edit Accept",
+        "icon": "$(check)"
+      },
+      {
+        "command": "azureCodex.inlineEditReject",
+        "title": "Azure Codex: Inline Edit Reject",
+        "icon": "$(close)"
+      },
+      {
+        "command": "azureCodex.fixDiagnostics",
+        "title": "Azure Codex: Fix Diagnostics (Active File)",
+        "icon": "$(tools)"
+      },
+      {
+        "command": "azureCodex.healthCheck",
+        "title": "Azure Codex: Health Check",
+        "icon": "$(pulse)"
+      },
+      {
+        "command": "azureCodex.configureEmbeddings",
+        "title": "Azure Codex: Configure Embeddings…",
+        "icon": "$(key)"
+      }
+    ],
+    "keybindings": [
+      {
+        "command": "azureCodex.inlineEdit",
+        "key": "ctrl+alt+k",
+        "mac": "cmd+alt+k",
+        "when": "editorTextFocus"
+      },
+      {
+        "command": "azureCodex.inlineEditCmdK",
+        "key": "ctrl+k",
+        "mac": "cmd+k",
+        "when": "editorTextFocus"
+      },
+      {
+        "command": "azureCodex.inlineEditAccept",
+        "key": "enter",
+        "when": "editorTextFocus && azureCodexInlineEditPreviewActive"
+      },
+      {
+        "command": "azureCodex.inlineEditReject",
+        "key": "escape",
+        "when": "editorTextFocus && azureCodexInlineEditPreviewActive"
+      }
+    ],
+    "menus": {
+      "editor/context": [
+        {
+          "command": "azureCodex.explainCode",
+          "when": "editorHasSelection",
+          "group": "azureCodex@1"
+        },
+        {
+          "command": "azureCodex.fixCode",
+          "when": "editorHasSelection",
+          "group": "azureCodex@2"
+        },
+        {
+          "command": "azureCodex.generateCode",
+          "group": "azureCodex@3"
+        },
+        {
+          "command": "azureCodex.inlineEdit",
+          "group": "azureCodex@4"
+        },
+        {
+          "command": "azureCodex.fixDiagnostics",
+          "group": "azureCodex@5"
+        }
+      ],
+      "editor/title": [
+        {
+          "command": "azureCodex.openChat",
+          "group": "navigation"
+        }
+      ]
+    },
+    "configuration": {
+      "title": "Azure Codex Chat",
+      "properties": {
+        "azureCodex.endpoint": {
+          "type": "string",
+          "default": "",
+          "description": "Your Azure OpenAI endpoint URL (e.g. https://your-resource.openai.azure.com/)"
+        },
+        "azureCodex.apiKey": {
+          "type": "string",
+          "default": "",
+          "description": "Your Azure OpenAI API Key"
+        },
+        "azureCodex.deploymentName": {
+          "type": "string",
+          "default": "gpt-5-2-codex-max",
+          "description": "Azure OpenAI deployment name"
+        },
+        "azureCodex.apiVersion": {
+          "type": "string",
+          "default": "2025-04-01-preview",
+          "description": "Legacy Chat Completions api-version (Responses API is used automatically for GPT-5/Codex deployments)"
+        },
+        "azureCodex.maxTokens": {
+          "type": "number",
+          "default": 4096,
+          "description": "Maximum output tokens per response"
+        },
+        "azureCodex.temperature": {
+          "type": "number",
+          "default": 0.2,
+          "description": "Model temperature (0-1). Lower = more deterministic."
+        },
+        "azureCodex.chatModelMode": {
+          "type": "string",
+          "default": "smart",
+          "enum": ["smart", "fast"],
+          "description": "Chat model mode. smart = higher quality, fast = cheaper/faster."
+        },
+        "azureCodex.chatSmartDeploymentName": {
+          "type": "string",
+          "default": "",
+          "description": "Optional deployment name to use for smart chat mode"
+        },
+        "azureCodex.chatFastDeploymentName": {
+          "type": "string",
+          "default": "",
+          "description": "Optional deployment name to use for fast chat mode"
+        },
+        "azureCodex.agentEnabled": {
+          "type": "boolean",
+          "default": false,
+          "description": "Enable agent mode (autonomous tool use for multi-step coding tasks)"
+        },
+        "azureCodex.agentMaxSteps": {
+          "type": "number",
+          "default": 6,
+          "description": "Maximum tool iterations per agent run"
+        },
+        "azureCodex.agentAllowShellCommands": {
+          "type": "boolean",
+          "default": false,
+          "description": "Allow the agent to run shell commands (you will still be asked to confirm each command)"
+        },
+        "azureCodex.agentDeploymentName": {
+          "type": "string",
+          "default": "",
+          "description": "Optional deployment name to use for agent runs"
+        },
+        "azureCodex.agentReviewBeforeApply": {
+          "type": "boolean",
+          "default": true,
+          "description": "In agent mode, stage changes and ask for review before writing to disk"
+        },
+        "azureCodex.memoryEnabled": {
+          "type": "boolean",
+          "default": true,
+          "description": "Enable persistent project memory (preferences/coding style)"
+        },
+        "azureCodex.memoryMaxItems": {
+          "type": "number",
+          "default": 50,
+          "description": "Maximum number of memory items stored per workspace"
+        },
+        "azureCodex.autocompleteDeploymentName": {
+          "type": "string",
+          "default": "",
+          "description": "Optional deployment name to use for inline autocomplete"
+        },
+        "azureCodex.embeddingsDeploymentName": {
+          "type": "string",
+          "default": "",
+          "description": "Embeddings deployment name (e.g. text-embedding-3-small). If empty, uses deploymentName."
+        },
+        "azureCodex.embeddingsEndpoint": {
+          "type": "string",
+          "default": "",
+          "description": "Optional separate Azure OpenAI endpoint for embeddings (if different from azureCodex.endpoint)"
+        },
+        "azureCodex.embeddingsApiKey": {
+          "type": "string",
+          "default": "",
+          "description": "Optional separate API key for embeddings endpoint"
+        },
+        "azureCodex.embeddingsApiVersion": {
+          "type": "string",
+          "default": "2023-05-15",
+          "description": "api-version used for legacy embeddings endpoint (/openai/deployments/{deployment}/embeddings)"
+        },
+        "azureCodex.semanticIndexEnabled": {
+          "type": "boolean",
+          "default": true,
+          "description": "Build/use a local semantic index for codebase Q&A and smarter context injection"
+        },
+        "azureCodex.semanticIndexAutoBuild": {
+          "type": "boolean",
+          "default": true,
+          "description": "Automatically build the semantic index in the background when needed"
+        },
+        "azureCodex.semanticTopK": {
+          "type": "number",
+          "default": 6,
+          "description": "How many relevant code chunks to retrieve per message"
+        },
+        "azureCodex.semanticChunkMaxChars": {
+          "type": "number",
+          "default": 2000,
+          "description": "Max characters per indexed code chunk"
+        },
+        "azureCodex.semanticMaxFiles": {
+          "type": "number",
+          "default": 800,
+          "description": "Maximum number of files to index (limits initial indexing time)"
+        },
+        "azureCodex.semanticMaxChunks": {
+          "type": "number",
+          "default": 2500,
+          "description": "Maximum number of chunks to embed/store (limits initial indexing time)"
+        },
+        "azureCodex.semanticMaxChars": {
+          "type": "number",
+          "default": 12000,
+          "description": "Max characters of semantic snippets to inject per message"
+        },
+        "azureCodex.autocompleteEnabled": {
+          "type": "boolean",
+          "default": false,
+          "description": "Enable inline autocomplete (Copilot-style) powered by Azure OpenAI"
+        },
+        "azureCodex.autocompleteMaxTokens": {
+          "type": "number",
+          "default": 96,
+          "description": "Max tokens for inline autocomplete responses"
+        },
+        "azureCodex.includeWorkspaceContext": {
+          "type": "boolean",
+          "default": true,
+          "description": "Include workspace context (file list, active file, and key docs) with each request"
+        },
+        "azureCodex.contextMaxChars": {
+          "type": "number",
+          "default": 20000,
+          "description": "Maximum characters of workspace context to send per request"
+        },
+        "azureCodex.includeFileList": {
+          "type": "boolean",
+          "default": true,
+          "description": "Include a workspace file list in the context"
+        },
+        "azureCodex.includeActiveFile": {
+          "type": "boolean",
+          "default": true,
+          "description": "Include the active editor file contents in the context"
+        },
+        "azureCodex.includeRootDocs": {
+          "type": "boolean",
+          "default": true,
+          "description": "Include README.md and package.json (if present) in the context"
+        },
+        "azureCodex.pinnedContextMaxChars": {
+          "type": "number",
+          "default": 20000,
+          "description": "Maximum characters of pinned context (added via + / Fetch) to include per request"
+        },
+        "azureCodex.attachmentsMaxBytes": {
+          "type": "number",
+          "default": 2000000,
+          "description": "Maximum size in bytes for each attached image"
+        },
+        "azureCodex.autoContinueOnTruncation": {
+          "type": "boolean",
+          "default": true,
+          "description": "Automatically request a continuation when the model output is truncated (e.g. token limit)."
+        },
+        "azureCodex.autoContinueMaxTurns": {
+          "type": "number",
+          "default": 4,
+          "description": "Maximum number of auto-continue turns per user message."
+        },
+        "azureCodex.autoApplyFileChanges": {
+          "type": "boolean",
+          "default": true,
+          "description": "Automatically apply ```file``` blocks after each assistant response (delete blocks still require manual Apply)"
+        }
+      }
+    },
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "azureCodexSidebar",
+          "title": "Azure Codex",
+          "icon": "media/icon.svg"
+        }
+      ]
+    },
+    "views": {
+      "azureCodexSidebar": [
+        {
+          "type": "webview",
+          "id": "azureCodex.chatView",
+          "name": "Chat"
+        }
+      ]
+    }
+  },
+  "scripts": {
+    "vscode:prepublish": "npm run compile",
+    "compile": "tsc -p ./",
+    "watch": "tsc -watch -p ./",
+    "package": "vsce package"
+  },
+  "dependencies": {
+    "@azure/openai": "^1.0.0-beta.12",
+    "axios": "^1.6.0",
+    "jszip": "^3.10.1",
+    "mammoth": "^1.9.1",
+    "pdf-parse": "^1.1.1",
+    "xlsx": "^0.18.5"
+  },
+  "devDependencies": {
+    "@types/node": "^20.0.0",
+    "@types/vscode": "^1.85.0",
+    "@vscode/vsce": "^3.7.1",
+    "typescript": "^5.3.0"
+  }
+}

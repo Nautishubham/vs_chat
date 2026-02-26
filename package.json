@@ -44,6 +44,11 @@
         "icon": "$(discard)"
       },
       {
+        "command": "azureCodex.openSessionHistory",
+        "title": "Azure Codex: Open Session History",
+        "icon": "$(history)"
+      },
+      {
         "command": "azureCodex.buildSemanticIndex",
         "title": "Azure Codex: Build Semantic Index",
         "icon": "$(database)"
@@ -155,7 +160,7 @@
         },
         "azureCodex.deploymentName": {
           "type": "string",
-          "default": "gpt-5-2-codex-max",
+          "default": "gpt-5.1-codex-max",
           "description": "Azure OpenAI deployment name"
         },
         "azureCodex.apiVersion": {
@@ -165,12 +170,12 @@
         },
         "azureCodex.maxTokens": {
           "type": "number",
-          "default": 4096,
+          "default": 128000,
           "description": "Maximum output tokens per response"
         },
         "azureCodex.temperature": {
           "type": "number",
-          "default": 0.2,
+          "default": 0.1,
           "description": "Model temperature (0-1). Lower = more deterministic."
         },
         "azureCodex.chatModelMode": {
@@ -301,8 +306,8 @@
         },
         "azureCodex.contextMaxChars": {
           "type": "number",
-          "default": 20000,
-          "description": "Maximum characters of workspace context to send per request"
+          "default": 50000,
+          "description": "Maximum characters of workspace context to send per request. Increase for larger projects."
         },
         "azureCodex.includeFileList": {
           "type": "boolean",
@@ -321,13 +326,23 @@
         },
         "azureCodex.pinnedContextMaxChars": {
           "type": "number",
-          "default": 20000,
-          "description": "Maximum characters of pinned context (added via + / Fetch) to include per request"
+          "default": 100000,
+          "description": "Maximum characters of pinned context (added via + / Fetch) to include per request. Increase for long documents."
         },
         "azureCodex.attachmentsMaxBytes": {
           "type": "number",
           "default": 2000000,
           "description": "Maximum size in bytes for each attached image"
+        },
+        "azureCodex.absolutePathReadsEnabled": {
+          "type": "boolean",
+          "default": true,
+          "description": "If enabled, the extension will auto-load local files into chat context when the user explicitly pastes an absolute path in a message."
+        },
+        "azureCodex.absolutePathMaxBytes": {
+          "type": "number",
+          "default": 2000000,
+          "description": "Maximum size in bytes for a file loaded via an absolute path in chat."
         },
         "azureCodex.autoContinueOnTruncation": {
           "type": "boolean",
@@ -339,10 +354,61 @@
           "default": 4,
           "description": "Maximum number of auto-continue turns per user message."
         },
+        "azureCodex.autoFetchRequestedFiles": {
+          "type": "boolean",
+          "default": true,
+          "description": "Automatically fetch ```request``` file blocks from the assistant into pinned context and continue without waiting for the user to click Fetch."
+        },
+        "azureCodex.autoPinCooldownMinutes": {
+          "type": "number",
+          "default": 10,
+          "description": "When auto-pinning matched CSV/Excel files, skip files that were auto-pinned in the last X minutes to reduce repeated context clutter (0 disables cooldown)."
+        },
+        "azureCodex.requestTimeoutMs": {
+          "type": "number",
+          "default": 300000,
+          "description": "Maximum time (ms) to wait for a model response before aborting and showing a timeout error. Default 5 minutes for long generations."
+        },
         "azureCodex.autoApplyFileChanges": {
           "type": "boolean",
           "default": true,
           "description": "Automatically apply ```file``` blocks after each assistant response (delete blocks still require manual Apply)"
+        },
+        "azureCodex.alwaysStartFreshOnOpen": {
+          "type": "boolean",
+          "default": true,
+          "description": "When opening Azure Codex chat, always start a fresh conversation instead of resuming the previous one."
+        },
+        "azureCodex.autoGenerateTests": {
+          "type": "boolean",
+          "default": true,
+          "description": "After applying code changes, generate/update related unit tests automatically"
+        },
+        "azureCodex.autoRunTests": {
+          "type": "boolean",
+          "default": false,
+          "description": "Automatically run tests after changes and attempt auto-fixes on failures"
+        },
+        "azureCodex.testCommand": {
+          "type": "string",
+          "default": "npm test -- --runInBand",
+          "description": "Shell command used to run tests for auto-test loop"
+        },
+        "azureCodex.agentPersona": {
+          "type": "string",
+          "default": "default",
+          "enum": ["default", "security", "performance", "reviewer"],
+          "description": "Preset agent persona that adjusts analysis priorities"
+        },
+        "azureCodex.agentCustomPersonaPrompt": {
+          "type": "string",
+          "default": "",
+          "description": "Optional custom persona instructions appended to system guidance"
+        },
+        "azureCodex.scrollNearBottomThreshold": {
+          "type": "number",
+          "default": 120,
+          "description": "Pixels from bottom to consider 'near bottom' for auto-scrolling (0 = always scroll, high = never auto-scroll)"
         }
       }
     },
@@ -374,6 +440,7 @@
   "dependencies": {
     "@azure/openai": "^1.0.0-beta.12",
     "axios": "^1.6.0",
+    "js-tiktoken": "^1.0.21",
     "jszip": "^3.10.1",
     "mammoth": "^1.9.1",
     "pdf-parse": "^1.1.1",

@@ -1,0 +1,13 @@
+.env
+.git/
+.gitignore
+node_modules/
+src/
+tsconfig.json
+.vscode/
+**/*.ts
+**/*.map
+**/*.tsbuildinfo
+.DS_Store
+*.log
+.env*

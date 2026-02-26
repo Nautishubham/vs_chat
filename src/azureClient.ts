@@ -1,8 +1,11 @@
 import * as vscode from 'vscode';
 import axios, { AxiosInstance } from 'axios';
 import type { IncomingMessage } from 'http';
+import * as http from 'http';
+import * as https from 'https';
 import * as fs from 'fs';
 import * as path from 'path';
+import { inspect } from 'util';
 
 export type ChatContent =
   | string
@@ -36,6 +39,16 @@ export interface ChatOptions {
 
 export interface EmbeddingsOptions {
   signal?: AbortSignal;
+}
+
+function safeToString(value: any): string {
+  if (typeof value === 'string') return value;
+  if (value instanceof Error) return value.message || value.name || 'Error';
+  try {
+    return inspect(value, { depth: 4, breakLength: 120, maxArrayLength: 50 });
+  } catch {
+    return '[unstringifiable]';
+  }
 }
 
 const SYSTEM_PROMPT = `You are Azure Codex, an expert AI coding assistant integrated into VS Code and backed by Azure OpenAI.
@@ -95,12 +108,23 @@ Local file handling rules (MUST FOLLOW when the user provides a path/filename):
 - Do NOT fetch from external sources and do NOT regenerate the file.
 - If a file path is provided, use it directly.
 - If only a filename is provided, search workspace folders first.
+- If the prompt includes a "Pinned text files" section, you ALREADY have the file contents. Use them directly.
+- NEVER emit a \`\`\`request\`\`\` block for any file that is already present in pinned context.
 - Prefer showing minimal Python snippets to: print current working directory, list files, locate the file, load it with the correct library, and confirm load (shape/columns).
 - Do NOT create or overwrite files unless the user explicitly asks.
 
 Output quality:
 - Prefer making changes by emitting \`\`\`file\`\`\` blocks (full file content) instead of asking the user to manually edit.
 - After any code/file changes, end with a short "Next improvements" list (tests, linting, validation, edge cases, refactors). Avoid repeating the full code there.`;
+
+const HARD_MODEL_SETTINGS = {
+  model: 'gpt-5.1-codex-max',
+  maxTokens: 128000,
+  temperature: 0.1,
+  stream: true,
+  presencePenalty: 0,
+  frequencyPenalty: 0
+} as const;
 
 export class AzureOpenAIClient {
   private httpClient!: AxiosInstance;
@@ -147,7 +171,7 @@ export class AzureOpenAIClient {
 
     this.endpoint = (config.get<string>('endpoint', '') || endpointFromEnv).replace(/\/$/, '');
     this.apiKey = config.get<string>('apiKey', '') || apiKeyFromEnv;
-    this.deploymentName = config.get<string>('deploymentName', '') || deploymentFromEnv || 'gpt-5-2-codex-max';
+    this.deploymentName = HARD_MODEL_SETTINGS.model;
 
     this.embeddingsEndpoint =
       (config.get<string>('embeddingsEndpoint', '') || embeddingsEndpointFromEnv || this.endpoint).replace(/\/$/, '');
@@ -158,9 +182,9 @@ export class AzureOpenAIClient {
     this.embeddingsApiVersion =
       config.get<string>('embeddingsApiVersion', '') || embeddingsApiVersionFromEnv || '2023-05-15';
 
-    this.maxTokens = config.get<number>('maxTokens', 4096);
-    this.temperature = config.get<number>('temperature', 0.2);
-    this.autocompleteMaxTokens = config.get<number>('autocompleteMaxTokens', 96);
+    this.maxTokens = HARD_MODEL_SETTINGS.maxTokens;
+    this.temperature = HARD_MODEL_SETTINGS.temperature;
+    this.autocompleteMaxTokens = HARD_MODEL_SETTINGS.maxTokens;
 
     this.httpClient = axios.create({
       baseURL: this.endpoint,
@@ -242,27 +266,37 @@ export class AzureOpenAIClient {
     const conversation: ChatMessage[] = [...history, { role: 'user', content: userMessage }];
 
     const preferResponses = this._shouldPreferResponsesApi();
-    const model = options?.model || this.deploymentName;
+    const model = HARD_MODEL_SETTINGS.model;
 
     try {
       if (preferResponses) {
-        await this._chatResponsesWithRetries(conversation, callbacks, options, model);
+        await this._withRetry(() => this._chatResponsesWithRetries(conversation, callbacks, options, model));
       } else {
-        await this._chatCompletionsWithRetries(conversation, callbacks, options, model);
+        await this._withRetry(() => this._chatCompletionsWithRetries(conversation, callbacks, options, model));
       }
     } catch (error: any) {
       if (this._isCanceled(error)) {
         callbacks.onError('Canceled');
         return;
       }
-      const primaryError = await this._formatAxiosError(error);
+      let primaryError = '';
+      try {
+        primaryError = await this._formatAxiosError(error);
+      } catch (e: any) {
+        primaryError = safeToString(e?.message || e || error);
+      }
 
       if (!preferResponses && this._shouldFallbackToResponses(error, primaryError)) {
         try {
-          await this._chatResponsesWithRetries(conversation, callbacks, options, model);
+          await this._withRetry(() => this._chatResponsesWithRetries(conversation, callbacks, options, model));
           return;
         } catch (fallbackError: any) {
-          const fallbackMsg = await this._formatAxiosError(fallbackError);
+          let fallbackMsg = '';
+          try {
+            fallbackMsg = await this._formatAxiosError(fallbackError);
+          } catch (e: any) {
+            fallbackMsg = safeToString(e?.message || e || fallbackError);
+          }
           callbacks.onError(`Azure OpenAI Error: ${fallbackMsg}`);
           return;
         }
@@ -270,10 +304,15 @@ export class AzureOpenAIClient {
 
       if (preferResponses && this._shouldFallbackToChatCompletions(error, primaryError)) {
         try {
-          await this._chatCompletionsWithRetries(conversation, callbacks, options, model);
+          await this._withRetry(() => this._chatCompletionsWithRetries(conversation, callbacks, options, model));
           return;
         } catch (fallbackError: any) {
-          const fallbackMsg = await this._formatAxiosError(fallbackError);
+          let fallbackMsg = '';
+          try {
+            fallbackMsg = await this._formatAxiosError(fallbackError);
+          } catch (e: any) {
+            fallbackMsg = safeToString(e?.message || e || fallbackError);
+          }
           callbacks.onError(`Azure OpenAI Error: ${fallbackMsg}`);
           return;
         }
@@ -318,41 +357,37 @@ export class AzureOpenAIClient {
     const body = { model: this.embeddingsDeploymentName, input };
 
     try {
-      const res = await this.embeddingsHttpClient.post(this._embeddingsUrl(), body, { signal: options?.signal });
-      const out = res?.data?.data;
-      if (!Array.isArray(out)) throw new Error('Unexpected embeddings response shape.');
-      const embeddings = out.map((d: any) => d?.embedding);
-      if (embeddings.length !== input.length) throw new Error('Embeddings response length mismatch.');
-      for (const e of embeddings) {
-        if (!Array.isArray(e)) throw new Error('Unexpected embeddings response shape.');
-      }
-      return embeddings as number[][];
+      const json = await this._postJson(this._embeddingsUrl(), body, {
+        signal: options?.signal,
+        apiKey: this.embeddingsApiKey,
+        baseEndpoint: this.embeddingsEndpoint
+      });
+      return this._parseEmbeddingsResponse(json, input.length);
     } catch (error: any) {
       if (this._isCanceled(error)) throw error;
-      const msg = await this._formatAxiosError(error);
+      const msg = safeToString(error?.message || error);
 
-      // If the newer v1 embeddings route fails (common across Azure resource configs),
-      // fall back to the legacy deployments/{deployment}/embeddings endpoint.
+      // Fall back to legacy deployments/{deployment}/embeddings endpoint.
       try {
-        const res = await this.embeddingsHttpClient.post(
-          this._legacyEmbeddingsUrl(),
-          { input },
-          { signal: options?.signal }
-        );
-        const out = res?.data?.data;
-        if (!Array.isArray(out)) throw new Error('Unexpected embeddings response shape.');
-        const embeddings = out.map((d: any) => d?.embedding);
-        if (embeddings.length !== input.length) throw new Error('Embeddings response length mismatch.');
-        for (const e of embeddings) {
-          if (!Array.isArray(e)) throw new Error('Unexpected embeddings response shape.');
-        }
-        return embeddings as number[][];
+        const json = await this._postJson(this._legacyEmbeddingsUrl(), { input }, { signal: options?.signal, apiKey: this.embeddingsApiKey, baseEndpoint: this.embeddingsEndpoint });
+        return this._parseEmbeddingsResponse(json, input.length);
       } catch (legacyError: any) {
         if (this._isCanceled(legacyError)) throw legacyError;
-        const legacyMsg = await this._formatAxiosError(legacyError);
+        const legacyMsg = safeToString(legacyError?.message || legacyError);
         throw new Error(`Embeddings failed. v1: ${msg} | legacy: ${legacyMsg}`);
       }
     }
+  }
+
+  private _parseEmbeddingsResponse(json: any, expected: number): number[][] {
+    const out = json?.data;
+    if (!Array.isArray(out)) throw new Error('Unexpected embeddings response shape.');
+    const embeddings = out.map((d: any) => d?.embedding);
+    if (embeddings.length !== expected) throw new Error('Embeddings response length mismatch.');
+    for (const e of embeddings) {
+      if (!Array.isArray(e)) throw new Error('Unexpected embeddings response shape.');
+    }
+    return embeddings as number[][];
   }
 
   async completeInline(
@@ -382,31 +417,185 @@ export class AzureOpenAIClient {
     ] as ChatMessage[];
 
     const url = this._responsesUrl();
-    const model = options?.model || this.deploymentName;
+    const model = HARD_MODEL_SETTINGS.model;
     const body: any = {
       model,
       input: input.map((m) => ({ role: m.role, content: this._toResponsesContent(m.content) })),
       max_output_tokens: this.autocompleteMaxTokens,
-      stream: true,
-      temperature: 0.0
+      stream: HARD_MODEL_SETTINGS.stream,
+      temperature: this.temperature,
+      presence_penalty: HARD_MODEL_SETTINGS.presencePenalty,
+      frequency_penalty: HARD_MODEL_SETTINGS.frequencyPenalty
     };
 
-    const response = await this.httpClient.post(
-      url,
-      body,
-      {
-        responseType: 'stream',
-        headers: { Accept: 'text/event-stream' },
-        signal: options?.signal
-      }
-    );
-
-    await this._consumeSseStream(response.data as IncomingMessage, callbacks, (json) => {
+    const stream = await this._postSseStream(url, body, options?.signal);
+    await this._consumeSseStream(stream, callbacks, (json) => {
       const type = json?.type;
       if (typeof type === 'string' && type.endsWith('.delta') && typeof json?.delta === 'string') {
         if (type.includes('output_text') || type.includes('text')) return json.delta;
       }
       return null;
+    }, options?.signal);
+  }
+
+  private _buildAbsoluteUrl(urlPath: string): URL {
+    const base = new URL(this.endpoint);
+    const baseRoot = new URL(`${base.protocol}//${base.host}`);
+
+    let pathWithQuery = urlPath;
+    // If endpoint already includes a path (e.g. ".../openai/v1"), preserve it for non-/openai/* routes.
+    if (base.pathname && base.pathname !== '/' && urlPath.startsWith('/') && !urlPath.startsWith('/openai/')) {
+      pathWithQuery = base.pathname.replace(/\/$/, '') + urlPath;
+    }
+
+    return new URL(pathWithQuery, baseRoot);
+  }
+
+  private async _postSseStream(urlPath: string, body: any, signal?: AbortSignal): Promise<IncomingMessage> {
+    const url = this._buildAbsoluteUrl(urlPath);
+    const payload = Buffer.from(JSON.stringify(body), 'utf8');
+
+    const headers: Record<string, string> = {
+      Accept: 'text/event-stream',
+      'Content-Type': 'application/json',
+      'Content-Length': String(payload.byteLength)
+    };
+    if (this.apiKey) headers['api-key'] = this.apiKey;
+    if (this.apiKey) headers['Authorization'] = `Bearer ${this.apiKey}`;
+
+    const lib = url.protocol === 'http:' ? http : https;
+
+    return await new Promise<IncomingMessage>((resolve, reject) => {
+      const req = lib.request(
+        url,
+        {
+          method: 'POST',
+          headers
+        },
+        (res) => {
+          const status = res.statusCode ?? 0;
+          if (status < 200 || status >= 300) {
+            let out = '';
+            res.on('data', (c) => (out += c.toString()));
+            res.on('end', () => {
+              const err: any = new Error(`HTTP ${status}: ${out.slice(0, 4000)}`);
+              err.httpStatus = status;
+              const retryAfter = res.headers?.['retry-after'];
+              if (retryAfter) err.retryAfter = Array.isArray(retryAfter) ? retryAfter[0] : String(retryAfter);
+              reject(err);
+            });
+            res.on('error', reject);
+            return;
+          }
+          resolve(res);
+        }
+      );
+
+      req.on('error', reject);
+
+      if (signal) {
+        const onAbort = () => {
+          try {
+            req.destroy(new Error('aborted'));
+          } catch {
+            // ignore
+          }
+        };
+        if (signal.aborted) {
+          onAbort();
+          return;
+        }
+        signal.addEventListener('abort', onAbort);
+        req.on('close', () => {
+          try {
+            signal.removeEventListener('abort', onAbort);
+          } catch {
+            // ignore
+          }
+        });
+      }
+
+      req.write(payload);
+      req.end();
+    });
+  }
+
+  private async _postJson(
+    urlPath: string,
+    body: any,
+    opts: { signal?: AbortSignal; apiKey: string; baseEndpoint: string }
+  ): Promise<any> {
+    const base = new URL(opts.baseEndpoint);
+    const baseRoot = new URL(`${base.protocol}//${base.host}`);
+    let pathWithQuery = urlPath;
+    if (base.pathname && base.pathname !== '/' && urlPath.startsWith('/') && !urlPath.startsWith('/openai/')) {
+      pathWithQuery = base.pathname.replace(/\/$/, '') + urlPath;
+    }
+    const url = new URL(pathWithQuery, baseRoot);
+    const payload = Buffer.from(JSON.stringify(body), 'utf8');
+
+    const headers: Record<string, string> = {
+      Accept: 'application/json',
+      'Content-Type': 'application/json',
+      'Content-Length': String(payload.byteLength),
+      'api-key': opts.apiKey || '',
+      Authorization: opts.apiKey ? `Bearer ${opts.apiKey}` : ''
+    };
+
+    const lib = url.protocol === 'http:' ? http : https;
+
+    return await new Promise<any>((resolve, reject) => {
+      const req = lib.request(url, { method: 'POST', headers }, (res) => {
+        const status = res.statusCode ?? 0;
+        let out = '';
+        res.on('data', (c) => (out += c.toString()));
+        res.on('end', () => {
+          if (status < 200 || status >= 300) {
+            reject(new Error(`HTTP ${status}: ${out.slice(0, 4000)}`));
+            return;
+          }
+          try {
+            resolve(JSON.parse(out));
+          } catch {
+            reject(new Error(`Invalid JSON response (HTTP ${status})`));
+          }
+        });
+        res.on('error', reject);
+      });
+
+      req.on('error', reject);
+      req.setTimeout(60_000, () => {
+        try {
+          req.destroy(new Error('timeout'));
+        } catch {
+          // ignore
+        }
+      });
+
+      if (opts.signal) {
+        const onAbort = () => {
+          try {
+            req.destroy(new Error('aborted'));
+          } catch {
+            // ignore
+          }
+        };
+        if (opts.signal.aborted) {
+          onAbort();
+          return;
+        }
+        opts.signal.addEventListener('abort', onAbort);
+        req.on('close', () => {
+          try {
+            opts.signal?.removeEventListener('abort', onAbort);
+          } catch {
+            // ignore
+          }
+        });
+      }
+
+      req.write(payload);
+      req.end();
     });
   }
 
@@ -483,25 +672,18 @@ export class AzureOpenAIClient {
     const input = conversation.map((m) => ({ role: m.role, content: this._toResponsesContent(m.content) }));
 
     const body: any = {
-      model,
+      model: HARD_MODEL_SETTINGS.model,
       instructions: SYSTEM_PROMPT,
       input,
       max_output_tokens: this.maxTokens,
-      stream: true
+      stream: HARD_MODEL_SETTINGS.stream,
+      presence_penalty: HARD_MODEL_SETTINGS.presencePenalty,
+      frequency_penalty: HARD_MODEL_SETTINGS.frequencyPenalty
     };
     if (options.includeTemperature) body.temperature = this.temperature;
 
-    const response = await this.httpClient.post(
-      url,
-      body,
-      {
-        responseType: 'stream',
-        headers: { Accept: 'text/event-stream' },
-        signal: requestOptions?.signal
-      }
-    );
-
-    await this._consumeSseStream(response.data as IncomingMessage, callbacks, (json) => {
+    const stream = await this._postSseStream(url, body, requestOptions?.signal);
+    await this._consumeSseStream(stream, callbacks, (json) => {
       // OpenAI/Azure Responses streaming events usually carry text deltas like:
       // { "type": "response.output_text.delta", "delta": "..." }
       const type = json?.type;
@@ -509,7 +691,7 @@ export class AzureOpenAIClient {
         if (type.includes('output_text') || type.includes('text')) return json.delta;
       }
       return null;
-    });
+    }, requestOptions?.signal);
   }
 
   private async _chatCompletionsWithRetries(
@@ -548,36 +730,65 @@ export class AzureOpenAIClient {
     const body: any = {
       messages,
       max_tokens: this.maxTokens,
-      stream: true
+      stream: HARD_MODEL_SETTINGS.stream,
+      presence_penalty: HARD_MODEL_SETTINGS.presencePenalty,
+      frequency_penalty: HARD_MODEL_SETTINGS.frequencyPenalty
     };
     if (options.includeTemperature) body.temperature = this.temperature;
 
-    const response = await this.httpClient.post(
-      url,
-      body,
-      {
-        responseType: 'stream',
-        headers: { Accept: 'text/event-stream' },
-        signal: requestOptions?.signal
-      }
-    );
-
-    await this._consumeSseStream(response.data as IncomingMessage, callbacks, (json) => {
+    const stream = await this._postSseStream(url, body, requestOptions?.signal);
+    await this._consumeSseStream(stream, callbacks, (json) => {
       const content = json?.choices?.[0]?.delta?.content;
       return typeof content === 'string' ? content : null;
-    });
+    }, requestOptions?.signal);
   }
 
   private async _consumeSseStream(
     stream: IncomingMessage,
     callbacks: StreamCallback,
-    extractToken: (json: any) => string | null
+    extractToken: (json: any) => string | null,
+    signal?: AbortSignal
   ): Promise<void> {
     return await new Promise<void>((resolve, reject) => {
       let buffer = '';
       const meta: StreamEndMeta = {};
+      let done = false;
+      let sawAnyData = false;
 
-      stream.on('data', (chunk: Buffer) => {
+      const cleanup = () => {
+        try {
+          stream.off('data', onData);
+          stream.off('end', onEnd);
+          stream.off('close', onClose);
+          stream.off('aborted', onAborted);
+          stream.off('error', onError);
+        } catch {
+          // ignore
+        }
+        try {
+          signal?.removeEventListener('abort', onAbort);
+        } catch {
+          // ignore
+        }
+      };
+
+      const onAbort = () => {
+        if (done) return;
+        done = true;
+        cleanup();
+        try {
+          // Ensure the streaming HTTP response is torn down; otherwise callers can hang forever.
+          (stream as any).destroy?.();
+        } catch {
+          // ignore
+        }
+        callbacks.onError('Canceled');
+        resolve();
+      };
+
+      const onData = (chunk: Buffer) => {
+        if (done) return;
+        sawAnyData = true;
         buffer += chunk.toString();
         const lines = buffer.split('\n');
         buffer = lines.pop() || '';
@@ -608,13 +819,52 @@ export class AzureOpenAIClient {
             // skip malformed chunks
           }
         }
-      });
+      };
 
-      stream.on('end', () => {
+      const onEnd = () => {
+        if (done) return;
+        done = true;
+        cleanup();
         callbacks.onDone(meta);
         resolve();
-      });
-      stream.on('error', (err: Error) => reject(err));
+      };
+
+      const onClose = () => {
+        if (done) return;
+        done = true;
+        cleanup();
+        // Some network failures surface as 'close' without 'end' or 'error' on SSE streams.
+        // Treat this as an error so callers can surface it and unstick the UI.
+        callbacks.onError(sawAnyData ? 'Connection closed while streaming.' : 'Connection closed before any data was received.');
+        resolve();
+      };
+
+      const onAborted = () => {
+        if (done) return;
+        done = true;
+        cleanup();
+        callbacks.onError('Connection aborted while streaming.');
+        resolve();
+      };
+
+      const onError = (err: Error) => {
+        if (done) return;
+        done = true;
+        cleanup();
+        reject(err);
+      };
+
+      if (signal?.aborted) {
+        onAbort();
+        return;
+      }
+      signal?.addEventListener('abort', onAbort);
+
+      stream.on('data', onData);
+      stream.on('end', onEnd);
+      stream.on('close', onClose);
+      stream.on('aborted', onAborted);
+      stream.on('error', onError);
     });
   }
 
@@ -633,14 +883,49 @@ export class AzureOpenAIClient {
       error?.response?.headers?.['x-ms-request-id'];
 
     let message = await this._extractErrorMessage(error);
-    if (!message) message = error?.message || 'Unknown error';
+    if (!message) message = safeToString(error?.message || 'Unknown error');
 
     const prefixParts: string[] = [];
-    if (typeof status === 'number') prefixParts.push(`HTTP ${status}`);
-    if (requestId) prefixParts.push(`requestId=${requestId}`);
+    if (typeof status === 'number') prefixParts.push(`HTTP ${String(status)}`);
+    if (requestId) prefixParts.push(`requestId=${safeToString(requestId)}`);
     const prefix = prefixParts.length ? `${prefixParts.join(' ')}: ` : '';
+    const base = `${prefix}${safeToString(message)}`;
+    const hint = this._buildConnectivityHint(error, message);
+    return hint ? `${base} ${hint}` : base;
+  }
 
-    return `${prefix}${message}`;
+  private _buildConnectivityHint(error: any, rawMessage: string): string {
+    const message = String(rawMessage || '').toLowerCase();
+    const code = String(error?.code || '').toLowerCase();
+    const endpoint = String(this.endpoint || '').trim();
+    const host = endpoint
+      ? endpoint.replace(/^https?:\/\//i, '').replace(/\/.*/g, '')
+      : '';
+
+    const looksLikeConnRefused =
+      code === 'econnrefused' ||
+      message.includes('econnrefused') ||
+      message.includes('connection refused');
+    const looksLikeDns =
+      code === 'enotfound' ||
+      code === 'eai_again' ||
+      message.includes('enotfound') ||
+      message.includes('eai_again') ||
+      message.includes('dns');
+    const looksLikeTimeout =
+      code === 'etimedout' ||
+      message.includes('etimedout') ||
+      message.includes('timeout');
+
+    if (!(looksLikeConnRefused || looksLikeDns || looksLikeTimeout)) return '';
+
+    const checks: string[] = [];
+    if (host) checks.push(`verify host reachability to ${host}:443`);
+    checks.push('confirm AZURE_OPENAI_ENDPOINT uses https://<resource>.openai.azure.com or your valid cognitive endpoint');
+    checks.push('if using Private Endpoint, ensure this machine/VPN has network access');
+    checks.push('check proxy/firewall rules and retry Azure Codex: Health Check');
+
+    return `Troubleshooting: ${checks.join('; ')}.`;
   }
 
   private async _extractErrorMessage(error: any): Promise<string> {
@@ -663,7 +948,8 @@ export class AzureOpenAIClient {
     }
 
     if (data && typeof data === 'object') {
-      return data?.error?.message || data?.message || JSON.stringify(data);
+      // Avoid throwing while stringifying unusual objects (e.g., BigInt, circular, proxies).
+      return data?.error?.message || data?.message || safeToString(data);
     }
 
     return '';
@@ -698,6 +984,55 @@ export class AzureOpenAIClient {
       m.includes(`'${p}' is not supported`) ||
       m.includes(`"${p}" is not supported`)
     );
+  }
+
+  private async _withRetry<T>(run: () => Promise<T>): Promise<T> {
+    let attempt = 0;
+    while (true) {
+      attempt++;
+      try {
+        return await run();
+      } catch (error: any) {
+        if (this._isCanceled(error)) throw error;
+        const status = Number(error?.httpStatus || error?.response?.status || 0);
+        const message = String(error?.message || '').toLowerCase();
+
+        const isNetworkOrTimeout =
+          message.includes('timeout') ||
+          message.includes('network') ||
+          message.includes('socket') ||
+          message.includes('econnrefused') ||
+          message.includes('connection refused') ||
+          message.includes('enotfound') ||
+          message.includes('eai_again') ||
+          message.includes('econnreset') ||
+          message.includes('etimedout');
+
+        if (status === 429 && attempt < 4) {
+          const retryAfterRaw = String(error?.retryAfter || error?.response?.headers?.['retry-after'] || '').trim();
+          const retryAfterSec = Number.parseInt(retryAfterRaw, 10);
+          const waitMs = Number.isFinite(retryAfterSec) && retryAfterSec > 0 ? retryAfterSec * 1000 : 2000;
+          await this._delay(waitMs);
+          continue;
+        }
+
+        if ((status === 500 || status === 503) && attempt < 3) {
+          await this._delay(5000);
+          continue;
+        }
+
+        if (isNetworkOrTimeout && attempt < 4) {
+          await this._delay(2000);
+          continue;
+        }
+
+        throw error;
+      }
+    }
+  }
+
+  private async _delay(ms: number): Promise<void> {
+    await new Promise<void>((resolve) => setTimeout(resolve, Math.max(0, ms)));
   }
 
   private _toResponsesContent(content: ChatContent): any {

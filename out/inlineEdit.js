@@ -143,15 +143,22 @@ async function runInlineEdit(client) {
     });
     if (!instruction)
         return;
-    let targetText = '';
+    const currentContent = doc.getText();
+    let contextText = '';
+    let isFullFile = false;
     if (!editor.selection.isEmpty) {
-        targetText = doc.getText(editor.selection);
+        contextText = doc.getText(editor.selection);
     }
     else {
         const line = editor.selection.active.line;
         const start = Math.max(0, line - 10);
         const end = Math.min(doc.lineCount, line + 11);
-        targetText = doc.getText(new vscode.Range(new vscode.Position(start, 0), new vscode.Position(end, 0)));
+        contextText = doc.getText(new vscode.Range(new vscode.Position(start, 0), new vscode.Position(end, 0)));
+    }
+    // If the full file is not too large, send it for better context
+    if (currentContent.length < 30000) {
+        contextText = currentContent;
+        isFullFile = true;
     }
     const userPrompt = `You will edit code in-place using a diff-based edit block.\n\n` +
         `Task: ${instruction}\n\n` +
@@ -160,8 +167,8 @@ async function runInlineEdit(client) {
         `Return ONLY a single \`\`\`edit\`\`\` block for that file.\n` +
         `- Each SEARCH must match exactly once in the current file.\n` +
         `- Keep changes minimal and localized.\n\n` +
-        `Current snippet to change (may be partial context):\n` +
-        `\`\`\`${language}\n${targetText}\n\`\`\``;
+        `${isFullFile ? 'Current file content' : 'Current snippet to change (may be partial context)'}:\n` +
+        `\`\`\`${language}\n${contextText}\n\`\`\``;
     const response = await client.chatToText([], userPrompt);
     const editBlock = extractFencedBlocks(response).find((b) => b.lang === 'edit');
     if (!editBlock) {
@@ -173,13 +180,13 @@ async function runInlineEdit(client) {
         vscode.window.showErrorMessage('Azure Codex: Could not parse edit block (expected first line like "path: ...").');
         return;
     }
-    const current = doc.getText();
-    const applied = applySearchReplaceEdits(current, parsed.content);
+    // Use the content we had when prompting
+    const applied = applySearchReplaceEdits(currentContent, parsed.content);
     if (!applied.ok) {
         vscode.window.showErrorMessage(`Azure Codex: Failed to apply edit block: ${applied.error}`);
         return;
     }
-    await showDiffPreview(current, applied.updated, `Azure Codex: Inline edit preview — ${relPath}`);
+    await showDiffPreview(currentContent, applied.updated, `Azure Codex: Inline edit preview — ${relPath}`);
     const confirm = await vscode.window.showWarningMessage(`Apply inline edit to ${relPath}?`, { modal: true }, 'Apply');
     if (confirm !== 'Apply')
         return;

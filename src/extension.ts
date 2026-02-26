@@ -36,8 +36,9 @@ export function activate(context: vscode.ExtensionContext) {
 
   // Command: Open Chat Panel
   context.subscriptions.push(
-    vscode.commands.registerCommand('azureCodex.openChat', () => {
-      vscode.commands.executeCommand('azureCodex.chatView.focus');
+    vscode.commands.registerCommand('azureCodex.openChat', async () => {
+      await vscode.commands.executeCommand('azureCodex.chatView.focus');
+      await chatProvider.startFreshChatOnOpen();
     })
   );
 
@@ -113,6 +114,13 @@ export function activate(context: vscode.ExtensionContext) {
   context.subscriptions.push(
     vscode.commands.registerCommand('azureCodex.undoLastApply', async () => {
       await chatProvider.undoLastApply();
+    })
+  );
+
+  // Command: Open Session History
+  context.subscriptions.push(
+    vscode.commands.registerCommand('azureCodex.openSessionHistory', async () => {
+      await chatProvider.openSessionHistory();
     })
   );
 

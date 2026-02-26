@@ -60,8 +60,9 @@ function activate(context) {
     // Inline autocomplete (optional)
     context.subscriptions.push(vscode.languages.registerInlineCompletionItemProvider({ scheme: 'file' }, new autocompleteProvider_1.AzureCodexInlineCompletionProvider(azureClient)));
     // Command: Open Chat Panel
-    context.subscriptions.push(vscode.commands.registerCommand('azureCodex.openChat', () => {
-        vscode.commands.executeCommand('azureCodex.chatView.focus');
+    context.subscriptions.push(vscode.commands.registerCommand('azureCodex.openChat', async () => {
+        await vscode.commands.executeCommand('azureCodex.chatView.focus');
+        await chatProvider.startFreshChatOnOpen();
     }));
     // Command: Explain Code
     context.subscriptions.push(vscode.commands.registerCommand('azureCodex.explainCode', async () => {
@@ -116,6 +117,10 @@ function activate(context) {
     // Command: Undo Last Apply
     context.subscriptions.push(vscode.commands.registerCommand('azureCodex.undoLastApply', async () => {
         await chatProvider.undoLastApply();
+    }));
+    // Command: Open Session History
+    context.subscriptions.push(vscode.commands.registerCommand('azureCodex.openSessionHistory', async () => {
+        await chatProvider.openSessionHistory();
     }));
     // Command: (Re)build Semantic Index
     context.subscriptions.push(vscode.commands.registerCommand('azureCodex.buildSemanticIndex', async () => {
